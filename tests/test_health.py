@@ -1,7 +1,11 @@
 def test_health(app_client):
     resp = app_client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    # The live build's short SHA (or "unknown" outside Vercel) — this is
+    # how a response shape change gets confirmed to be deployed.
+    assert body["commit"]
 
 
 def test_health_head(app_client):

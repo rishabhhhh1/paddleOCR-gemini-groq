@@ -282,6 +282,38 @@ def _get_pool(settings: Settings) -> list[_PooledEngine]:
     return _engine_pool
 
 
+# One OCR semaphore for the whole process, not one per request. Keyed by
+# event loop because asyncio primitives bind to the loop they are first
+# awaited on, and the test suite runs a fresh loop per test.
+_semaphores: dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Semaphore]] = {}
+_semaphores_lock = threading.Lock()
+
+
+def _get_semaphore(settings: Settings) -> asyncio.Semaphore:
+    """Returns the process-wide OCR semaphore for the running loop.
+
+    run_ocr_on_images used to build a new Semaphore on every call, so the
+    bound it implements held only *within* one request. Under Fluid
+    Compute several requests share a single instance and event loop, and
+    each arrived with its own permits: N screenshots decoding at once
+    while only the engine lock serialized predict — every waiting request
+    parked its full tile set in memory, which is exactly the peak the
+    semaphore exists to prevent on a 2 GB host. Sharing one restores the
+    documented bound across concurrent requests."""
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    with _semaphores_lock:
+        entry = _semaphores.get(key)
+        if entry is not None and entry[0].is_closed():
+            # Loop is gone (test teardown); don't accumulate entries.
+            del _semaphores[key]
+            entry = None
+        if entry is None:
+            entry = (loop, asyncio.Semaphore(max(1, settings.OCR_MAX_CONCURRENCY)))
+            _semaphores[key] = entry
+        return entry[1]
+
+
 def _sort_key_from_box(box: Any) -> tuple[float, float]:
     """Returns a (y, x) reading-order sort key from either an
     [x1, y1, x2, y2] axis-aligned box or a 4-point polygon
@@ -536,8 +568,12 @@ async def run_ocr_on_images(
     if not images:
         return []
 
-    pool = _get_pool(settings)
-    semaphore = asyncio.Semaphore(max(1, settings.OCR_MAX_CONCURRENCY))
+    # Off the event loop: building the pool loads models and can hold the
+    # engine lock for tens of seconds while the startup warm-up is still
+    # running, and a request that waits on it *synchronously* freezes
+    # every other request in the instance.
+    pool = await asyncio.to_thread(_get_pool, settings)
+    semaphore = _get_semaphore(settings)
     tasks = [_ocr_single_image(idx, img, pool, semaphore) for idx, img in enumerate(images)]
     results = await asyncio.gather(*tasks)
     return sorted(results, key=lambda r: r.index)

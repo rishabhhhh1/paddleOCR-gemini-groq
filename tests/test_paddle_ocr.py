@@ -219,3 +219,45 @@ def test_a_lone_box_at_the_left_edge_is_not_a_column():
 
     columns = _split_columns(_rail_and_body([("Notes", 10.0, 696.0, 50.0, 717.0)]))
     assert len(columns) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_share_one_ocr_bound(monkeypatch):
+    """The bound has to hold across requests, not just within one.
+
+    Under Fluid Compute several requests share an instance, so a fresh
+    semaphore per request let them all decode at once — the peak-memory
+    condition the semaphore exists to prevent."""
+    import asyncio
+    import threading
+    import time
+
+    from app.config import get_settings
+    from app.services import paddle_ocr as po
+
+    state = {"active": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def slow_decode(img):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+        return [np.zeros((4, 4, 3), dtype=np.uint8)]
+
+    class FakeEngine:
+        pass
+
+    monkeypatch.setattr("app.services.paddle_ocr._decode_tiles", slow_decode)
+    monkeypatch.setattr("app.services.paddle_ocr._run_predict", lambda engine, arr: ["line"])
+    monkeypatch.setattr("app.services.paddle_ocr._get_pool", lambda settings: [FakeEngine()])
+
+    settings = get_settings()
+    await asyncio.gather(
+        po.run_ocr_on_images(settings, [_extracted(10, 10)]),
+        po.run_ocr_on_images(settings, [_extracted(10, 10)]),
+        po.run_ocr_on_images(settings, [_extracted(10, 10)]),
+    )
+    assert state["peak"] == 1, f"OCR bound leaked across requests: peak={state['peak']}"

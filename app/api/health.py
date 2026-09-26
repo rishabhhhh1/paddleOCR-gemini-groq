@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter
 
 router = APIRouter(tags=["health"])
@@ -11,4 +13,9 @@ router = APIRouter(tags=["health"])
 @router.get("/health")
 @router.head("/health")
 async def health():
-    return {"status": "ok"}
+    # Which build is actually serving. An error contract change is
+    # invisible otherwise — a client still reporting the old response
+    # shape after a deploy looks exactly like a deploy that never
+    # happened, and there was no way to tell those apart from outside.
+    sha = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")
+    return {"status": "ok", "commit": sha[:12] if sha else "unknown"}
