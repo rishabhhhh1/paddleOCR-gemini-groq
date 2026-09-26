@@ -213,6 +213,32 @@ def test_mocked_solver_failure_returns_502(app_client, backend_api_key, monkeypa
     )
     assert resp.status_code == 502
     assert resp.json()["error"]["type"] == "upstream_error"
+    assert resp.json()["error"]["code"] == "solver_failed"
+
+
+def test_unreadable_screenshot_is_a_400_not_a_502(app_client, backend_api_key, monkeypatch):
+    import app.api.chat_completions as cc
+    from app.services.paddle_ocr import OCR_CODE_INVALID_IMAGE, PaddleOcrError
+
+    async def failing_ocr(settings, images, client=None):
+        raise PaddleOcrError("Could not decode image for OCR: image file is truncated", code=OCR_CODE_INVALID_IMAGE)
+
+    monkeypatch.setattr(cc, "run_ocr_on_images", failing_ocr)
+    _mock_solver(monkeypatch)
+
+    img = make_test_image_data_url("PNG")
+    resp = app_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {backend_api_key}"},
+        json={
+            "model": "dsa-solver",
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": img}}]}],
+        },
+    )
+    assert resp.status_code == 400
+    err = resp.json()["error"]
+    assert err["type"] == "invalid_request_error"
+    assert err["code"] == "invalid_image"
 
 
 def test_mocked_ocr_failure_returns_502(app_client, backend_api_key, monkeypatch):
@@ -235,6 +261,7 @@ def test_mocked_ocr_failure_returns_502(app_client, backend_api_key, monkeypatch
         },
     )
     assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "ocr_inference_failed"
 
 
 def test_solve_from_previously_ocrd_results_skips_ocr(app_client, backend_api_key, monkeypatch):

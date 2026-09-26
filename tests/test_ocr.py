@@ -140,3 +140,53 @@ def test_ocr_batch_stitch_false_uses_unstitched_text(app_client, backend_api_key
     body = resp.json()
     assert "DUPLICATE" not in body["text"]
     assert body["text"].count("Repeated content line one") == 2
+
+
+def test_unreadable_screenshot_is_a_400_not_a_502(app_client, backend_api_key, monkeypatch):
+    """A screenshot the server cannot decode is a bad request. Validation
+    misses it because verify() never fully decodes, so it surfaces from
+    inside run_ocr_on_images — it must not be reported as an upstream OCR
+    outage."""
+    import app.api.ocr as ocr_module
+    from app.services.paddle_ocr import OCR_CODE_INVALID_IMAGE, PaddleOcrError
+
+    async def failing_ocr(settings, images, client=None):
+        raise PaddleOcrError(
+            "Could not decode image for OCR: image file is truncated (28 bytes not processed)",
+            code=OCR_CODE_INVALID_IMAGE,
+        )
+
+    monkeypatch.setattr(ocr_module, "run_ocr_on_images", failing_ocr)
+
+    resp = app_client.post(
+        "/v1/ocr",
+        headers={"Authorization": f"Bearer {backend_api_key}"},
+        json=_batch([make_test_image_data_url("PNG")]),
+    )
+    assert resp.status_code == 400
+    err = resp.json()["error"]
+    assert err["type"] == "invalid_request_error"
+    assert err["code"] == "invalid_image"
+    assert "truncated" in err["message"]
+
+
+def test_ocr_upstream_failure_carries_a_diagnostic_code(app_client, backend_api_key, monkeypatch):
+    """The 502 body is deliberately generic, so error.code is what tells a
+    client (and us, from a screenshot of the response) which stage broke."""
+    import app.api.ocr as ocr_module
+    from app.services.paddle_ocr import OCR_CODE_INFERENCE, PaddleOcrError
+
+    async def failing_ocr(settings, images, client=None):
+        raise PaddleOcrError("PaddleOCR inference failed: boom", code=OCR_CODE_INFERENCE)
+
+    monkeypatch.setattr(ocr_module, "run_ocr_on_images", failing_ocr)
+
+    resp = app_client.post(
+        "/v1/ocr",
+        headers={"Authorization": f"Bearer {backend_api_key}"},
+        json=_batch([make_test_image_data_url("PNG")]),
+    )
+    assert resp.status_code == 502
+    err = resp.json()["error"]
+    assert err["type"] == "upstream_error"
+    assert err["code"] == "ocr_inference_failed"

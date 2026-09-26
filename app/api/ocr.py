@@ -20,14 +20,14 @@ from app.config import Settings, get_settings
 from app.models.openai import make_error
 from app.models.solver import OcrResult
 from app.security.auth import require_backend_api_key
-from app.services.paddle_ocr import PaddleOcrError, run_ocr_on_images
+from app.services.paddle_ocr import OCR_CODE_INVALID_IMAGE, PaddleOcrError, run_ocr_on_images
 from app.services.problem_reconstructor import format_screenshot_blocks
 from app.utils.images import (
     ImageValidationError,
     decode_and_validate_image,
     validate_image_count,
 )
-from app.utils.logging import Timer, log_request_event, new_request_id
+from app.utils.logging import Timer, log_ocr_failure, log_request_event, new_request_id
 
 router = APIRouter(tags=["ocr"])
 
@@ -116,11 +116,25 @@ async def ocr_batch(
     try:
         with ocr_timer:
             raw_results = await run_ocr_on_images(settings, images)
-    except PaddleOcrError:
+    except PaddleOcrError as exc:
+        log_ocr_failure(request_id, str(exc))
+        if exc.code == OCR_CODE_INVALID_IMAGE:
+            # The screenshot itself is unreadable (truncated file, no
+            # pixels, a format Pillow only half-parses). Validation
+            # passes those because verify() does not fully decode, so
+            # this is where they surface — and it is a bad request, not
+            # an upstream failure, so it must not masquerade as a 502.
+            log_request_event(request_id, num_images=len(images), success=False, http_status=400)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=make_error(str(exc), "invalid_request_error", param="images", code=exc.code),
+            )
         log_request_event(request_id, num_images=len(images), success=False, http_status=502)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=make_error("Local OCR failed to process the screenshots.", "upstream_error"),
+            detail=make_error(
+                "Local OCR failed to process the screenshots.", "upstream_error", code=exc.code
+            ),
         )
 
     offset = body.start_index

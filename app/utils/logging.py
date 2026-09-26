@@ -41,6 +41,21 @@ def log_request_event(
     )
 
 
+def log_ocr_failure(request_id: str, reason: str) -> None:
+    """Records why the local OCR stage raised PaddleOcrError.
+
+    Same contract as log_solver_failure: the reason reaches the logs and
+    never the response body, because PaddleOcrError messages are built
+    from decode failures, engine-load failures, and PaddleOCR's own
+    inference exceptions (image geometry, model files, OOM) and are
+    exactly what a 502 needs to be diagnosable. Without this the client
+    sees a bare "Local OCR failed to process the screenshots." and the
+    server logs only the 502 status line. It must never contain API keys
+    or raw image bytes — PaddleOcrError carries exception text only.
+    """
+    logger.warning("request_id=%s ocr_failed=%s", request_id, reason)
+
+
 def log_solver_failure(request_id: str, reason: str) -> None:
     """Records why the solver pipeline rejected an answer.
 

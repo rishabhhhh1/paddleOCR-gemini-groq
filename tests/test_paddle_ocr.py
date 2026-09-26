@@ -123,15 +123,42 @@ def test_tall_image_is_sliced_and_every_tile_is_bounded():
 
 
 def test_corrupt_image_raises_a_domain_error():
-    from app.services.paddle_ocr import PaddleOcrError
+    from app.services.paddle_ocr import OCR_CODE_INVALID_IMAGE, PaddleOcrError
 
     bad = ExtractedImage(mime_type="image/png", data=b"not-an-image")
     try:
         _decode_tiles(bad)
-    except PaddleOcrError:
-        pass
+    except PaddleOcrError as exc:
+        # Tagged as a client-input problem so the routes answer 400
+        # instead of blaming an upstream OCR provider with a 502.
+        assert exc.code == OCR_CODE_INVALID_IMAGE
     else:
         raise AssertionError("expected PaddleOcrError")
+
+
+def test_truncated_jpeg_is_tagged_as_a_client_error():
+    """verify() does not fully decode, so a truncated JPEG clears image
+    validation and only dies here — it must arrive tagged as the
+    client's problem, not as an upstream failure."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from app.services.paddle_ocr import OCR_CODE_INVALID_IMAGE, PaddleOcrError
+
+    img = Image.new("RGB", (640, 480), (255, 255, 255))
+    ImageDraw.Draw(img).text((20, 20), "problem statement", fill=(0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    truncated = buf.getvalue()[: int(len(buf.getvalue()) * 0.4)]
+
+    try:
+        _decode_tiles(ExtractedImage(mime_type="image/jpeg", data=truncated))
+    except PaddleOcrError as exc:
+        assert exc.code == OCR_CODE_INVALID_IMAGE
+        assert "truncated" in str(exc)
+    else:
+        raise AssertionError("expected PaddleOcrError for a truncated JPEG")
 
 
 @pytest.mark.asyncio

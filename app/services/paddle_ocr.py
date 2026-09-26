@@ -47,8 +47,23 @@ from app.config import Settings
 from app.models.solver import ExtractedImage, OcrResult
 
 
+# Diagnostic codes carried on PaddleOcrError. They reach the client as the
+# OpenAI-style `error.code` field, because the message body is deliberately
+# generic ("Local OCR failed to process the screenshots.") and that left a
+# 502 completely unattributable — an unreadable screenshot, a model that
+# never loaded, and an out-of-memory inference all looked identical from
+# outside. None of them name a path, a provider, or a limit.
+OCR_CODE_INVALID_IMAGE = "invalid_image"  # we could not decode the file: the client's problem
+OCR_CODE_ENGINE_LOAD = "ocr_engine_load_failed"
+OCR_CODE_INFERENCE = "ocr_inference_failed"
+
+
 class PaddleOcrError(Exception):
     """Raised when local PaddleOCR inference fails."""
+
+    def __init__(self, message: str, *, code: str = OCR_CODE_INFERENCE):
+        super().__init__(message)
+        self.code = code
 
 
 class _PooledEngine:
@@ -230,7 +245,7 @@ def _decode_tiles(image: ExtractedImage) -> list[np.ndarray]:
             page = _normalize(im)
             width, height = page.size
             if width <= 0 or height <= 0:
-                raise PaddleOcrError("Image has no pixels.")
+                raise PaddleOcrError("Image has no pixels.", code=OCR_CODE_INVALID_IMAGE)
 
             scale = _scale_for_width(width)
             row_std = _row_std_for_split(page) if height * scale > TILE_HEIGHT_PX else None
@@ -248,7 +263,7 @@ def _decode_tiles(image: ExtractedImage) -> list[np.ndarray]:
     except PaddleOcrError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise PaddleOcrError(f"Could not decode image for OCR: {exc}") from exc
+        raise PaddleOcrError(f"Could not decode image for OCR: {exc}", code=OCR_CODE_INVALID_IMAGE) from exc
 
 
 def _get_pool(settings: Settings) -> list[_PooledEngine]:
@@ -263,7 +278,7 @@ def _get_pool(settings: Settings) -> list[_PooledEngine]:
                     size = max(1, settings.OCR_MAX_CONCURRENCY)
                     _engine_pool = [_PooledEngine(settings) for _ in range(size)]
                 except Exception as exc:  # noqa: BLE001
-                    raise PaddleOcrError(f"Failed to load PaddleOCR engine: {exc}") from exc
+                    raise PaddleOcrError(f"Failed to load PaddleOCR engine: {exc}", code=OCR_CODE_ENGINE_LOAD) from exc
     return _engine_pool
 
 
@@ -476,7 +491,7 @@ def _run_predict(engine: _PooledEngine, image_array: np.ndarray) -> list[str]:
         try:
             result = engine.engine.predict(image_array)
         except Exception as exc:  # noqa: BLE001
-            raise PaddleOcrError(f"PaddleOCR inference failed: {exc}") from exc
+            raise PaddleOcrError(f"PaddleOCR inference failed: {exc}", code=OCR_CODE_INFERENCE) from exc
     return _lines_in_reading_order(result)
 
 
